@@ -4,6 +4,7 @@ module Dynflow
     require 'dynflow/middleware/world'
     require 'dynflow/middleware/resolver'
     require 'dynflow/middleware/stack'
+    require 'dynflow/middleware/common/transaction'
 
     include Algebrick::TypeCheck
 
@@ -19,6 +20,10 @@ module Dynflow
     # to get the action object
     def action
       @stack.action or raise "the action is not available"
+    end
+
+    def delay(*args)
+      pass(*args)
     end
 
     def run(*args)
@@ -41,5 +46,8 @@ module Dynflow
       pass(*args)
     end
 
+    def present
+      pass
+    end
   end
 end

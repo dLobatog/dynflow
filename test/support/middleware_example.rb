@@ -14,6 +14,12 @@ module Support
         LogMiddleware.log << "#{self.class.name[/\w+$/]}::#{message}"
       end
 
+      def delay(*args)
+        log 'before_delay'
+        pass *args
+        log 'after_delay'
+      end
+
       def plan(args)
         log 'before_plan'
         pass(args)
@@ -33,13 +39,13 @@ module Support
         log 'after_finalize'
       end
 
-      def plan_phase
+      def plan_phase(*_)
         log 'before_plan_phase'
         pass
         log 'after_plan_phase'
       end
 
-      def finalize_phase
+      def finalize_phase(*_)
         log 'before_finalize_phase'
         pass
         log 'after_finalize_phase'
@@ -64,12 +70,50 @@ module Support
     class AnotherLogRunMiddleware < LogRunMiddleware
     end
 
+    class FilterSensitiveData < Dynflow::Middleware
+      def present
+        if action.respond_to?(:filter_sensitive_data)
+          action.filter_sensitive_data
+        end
+        filter_sensitive_data(action.input)
+        filter_sensitive_data(action.output)
+      end
+
+      def filter_sensitive_data(data)
+        case data
+        when Hash
+          data.values.each { |value| filter_sensitive_data(value) }
+        when Array
+          data.each { |value| filter_sensitive_data(value) }
+        when String
+          data.gsub!('Lord Voldemort', 'You-Know-Who')
+        end
+      end
+    end
+
+    class SecretAction < Dynflow::Action
+      middleware.use(FilterSensitiveData)
+
+      def run
+        output[:spell] = 'Wingardium Leviosa'
+      end
+
+      def filter_sensitive_data
+        output[:spell] = '***'
+      end
+    end
+
     class LoggingAction < Dynflow::Action
 
       middleware.use LogMiddleware
 
       def log(message)
         LogMiddleware.log << message
+      end
+
+      def delay(delay_options, *args)
+        log 'delay'
+        Dynflow::Serializers::Noop.new(args)
       end
 
       def plan(input)
@@ -100,6 +144,22 @@ module Support
       end
     end
 
+    class AnotherObservingMiddleware < ObservingMiddleware
+
+      def delay(*args)
+        pass(*args).tap do
+          log("delay#set-input:#{action.world.id}")
+          action.input[:message] = action.world.id
+        end
+      end
+
+      def plan(*args)
+        log("plan#input:#{action.input[:message]}")
+        pass(*args)
+      end
+
+    end
+
     class Action < Dynflow::Action
       middleware.use LogRunMiddleware
 
@@ -123,6 +183,12 @@ module Support
 
     class SubActionReplaceRule < Action
       middleware.use AnotherLogRunMiddleware, replace: LogRunMiddleware
+    end
+
+    class SubActionDoNotUseRule < Action
+      middleware.use AnotherLogRunMiddleware
+      middleware.do_not_use AnotherLogRunMiddleware
+      middleware.do_not_use LogRunMiddleware
     end
 
     class SubActionAfterRule < Action

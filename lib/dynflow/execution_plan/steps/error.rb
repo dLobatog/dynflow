@@ -32,7 +32,7 @@ module Dynflow
 
       def self.new_from_hash(hash)
         exception_class = begin
-                            hash[:exception_class].constantize
+                            Utils.constantize(hash[:exception_class])
                           rescue NameError
                             Errors::UnknownError.for_exception_class(hash[:exception_class])
                           end
@@ -55,7 +55,7 @@ module Dynflow
 
       def exception
         @exception ||
-            exception_class.exception(message).tap { |e| e.set_backtrace backtrace }
+          exception_class.exception(message).tap { |e| e.set_backtrace backtrace }
       end
     end
   end

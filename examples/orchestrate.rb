@@ -24,7 +24,6 @@ require_relative 'example_helper'
 
 module Orchestrate
 
-
   class CreateInfrastructure < Dynflow::Action
 
     def plan
@@ -145,6 +144,7 @@ module Orchestrate
 end
 
 if $0 == __FILE__
+  ExampleHelper.world.action_logger.level = Logger::INFO
   ExampleHelper.something_should_fail!
   ExampleHelper.world.trigger(Orchestrate::CreateInfrastructure)
   Thread.new do

@@ -11,22 +11,22 @@ module Dynflow
 
       specify '#plan_action' do
         input  = { 'input' => 'input' }
-        action = create_and_plan_action CWE::DummyHeavyProgress, input
+        action = create_and_plan_action Support::DummyExample::WeightedPolling, input
 
-        action.must_be_kind_of CWE::DummyHeavyProgress
+        action.must_be_kind_of Support::DummyExample::WeightedPolling
         action.phase.must_equal Action::Plan
         action.input.must_equal input
         action.execution_plan.must_be_kind_of Testing::DummyExecutionPlan
         action.state.must_equal :success
         assert_run_phase action
         assert_finalize_phase action
-        assert_action_planed action, CWE::DummySuspended
-        refute_action_planed action, CWE::DummyAnotherTrigger
+        assert_action_planned action, Support::DummyExample::Polling
+        refute_action_planned action, CWE::DummyAnotherTrigger
       end
 
       specify 'stub_plan_action' do
-        action = create_action CWE::DummyHeavyProgress
-        action.execution_plan.stub_planned_action(CWE::DummySuspended) do |sub_action|
+        action = create_action Support::DummyExample::WeightedPolling
+        action.execution_plan.stub_planned_action(Support::DummyExample::Polling) do |sub_action|
           sub_action.define_singleton_method(:test) { "test" }
         end
         plan_action(action, {})
@@ -34,12 +34,18 @@ module Dynflow
         stubbed_action.test.must_equal "test"
       end
 
+      specify '#create_action_presentation' do
+        action = create_action_presentation(Support::DummyExample::WeightedPolling)
+        action.output['message'] = 'make the world a better place'
+        action.humanized_output.must_equal 'You should make the world a better place'
+      end
+
       specify '#run_action without suspend' do
         input  = { 'input' => 'input' }
-        plan   = create_and_plan_action CWE::DummyHeavyProgress, input
+        plan   = create_and_plan_action Support::DummyExample::WeightedPolling, input
         action = run_action plan
 
-        action.must_be_kind_of CWE::DummyHeavyProgress
+        action.must_be_kind_of Support::DummyExample::WeightedPolling
         action.phase.must_equal Action::Run
         action.input.must_equal input
         action.world.must_equal plan.world
@@ -49,7 +55,7 @@ module Dynflow
 
       specify '#run_action with suspend' do
         input  = { 'input' => 'input' }
-        plan   = create_and_plan_action CWE::DummySuspended, input
+        plan   = create_and_plan_action Support::DummyExample::Polling, input
         action = run_action plan
 
         action.output.must_equal 'task' => { 'progress' => 0, 'done' => false }
@@ -68,7 +74,6 @@ module Dynflow
 
         5.times { progress_action_time action }
 
-
         action.output.must_equal('task' => { 'progress' => 100, 'done' => true },
                                  'poll_attempts' => {'total' => 9, 'failed' => 0 })
         action.run_progress.must_equal 1
@@ -76,12 +81,12 @@ module Dynflow
 
       specify '#finalize_action' do
         input                 = { 'input' => 'input' }
-        plan                  = create_and_plan_action CWE::DummyHeavyProgress, input
+        plan                  = create_and_plan_action Support::DummyExample::WeightedPolling, input
         run                   = run_action plan
         $dummy_heavy_progress = false
         action                = finalize_action run
 
-        action.must_be_kind_of CWE::DummyHeavyProgress
+        action.must_be_kind_of Support::DummyExample::WeightedPolling
         action.phase.must_equal Action::Finalize
         action.input.must_equal input
         action.output.must_equal run.output
@@ -103,11 +108,11 @@ module Dynflow
           refute_run_phase action
           refute_finalize_phase action
 
-          assert_action_planed action, CWE::Ci
-          assert_action_planed_with action, CWE::Review do |_, name, _|
+          assert_action_planned action, CWE::Ci
+          assert_action_planned_with action, CWE::Review do |_, name, _|
             name == 'Morfeus'
           end
-          assert_action_planed_with action, CWE::Review, sha, 'Neo', true
+          assert_action_planned_with action, CWE::Review, sha, 'Neo', true
         end
       end
 
@@ -118,7 +123,7 @@ module Dynflow
         let(:runned_action) { run_action planned_action }
 
         it 'plans' do
-          planned_action.input.must_equal input.stringify_keys
+          planned_action.input.must_equal Utils.stringify_keys(input)
           assert_run_phase planned_action, { commit: "sha", reviewer: "name", result: true}
           refute_finalize_phase planned_action
 
@@ -160,6 +165,79 @@ module Dynflow
         end
       end
     end
-  end
 
+    describe "in thread executor" do
+      let :world do
+        Dynflow::Testing::InThreadWorld.instance
+      end
+
+      let :issues_data do
+        [{ 'author' => 'Peter Smith', 'text' => 'Failing test' },
+         { 'author' => 'John Doe', 'text' => 'Internal server error' }]
+      end
+
+      let :failing_issues_data do
+        [{ 'author' => 'Peter Smith', 'text' => 'Failing test' },
+         { 'author' => 'John Doe', 'text' => 'trolling' }]
+      end
+
+      let :finalize_failing_issues_data do
+        [{ 'author' => 'Peter Smith', 'text' => 'Failing test' },
+         { 'author' => 'John Doe', 'text' => 'trolling in finalize' }]
+      end
+
+      let :execution_plan do
+        world.plan(Support::CodeWorkflowExample::IncomingIssues, issues_data)
+      end
+
+      let :failed_execution_plan do
+        plan = world.plan(Support::CodeWorkflowExample::IncomingIssues, failing_issues_data)
+        plan = world.execute(plan.id).value
+        plan.state.must_equal :paused
+        plan
+      end
+
+      let :polling_execution_plan do
+        world.plan(Support::DummyExample::Polling, { :external_task_id => '123' })
+      end
+
+      it "is able to execute plans inside the thread" do
+        world.execute(execution_plan.id).value.tap do |plan|
+          plan.state.must_equal :stopped
+        end
+      end
+
+      it "is able to handle errors in the plan" do
+        world.execute(failed_execution_plan.id).value.tap do |plan|
+          plan.state.must_equal :paused
+        end
+      end
+
+      it "is able to handle when events" do
+        world.execute(polling_execution_plan.id).value.tap do |plan|
+          plan.state.must_equal :stopped
+        end
+      end
+
+      describe 'auto rescue' do
+        let(:world) do
+          WorldFactory.create_world(Dynflow::Testing::InThreadWorld) do |config|
+            config.auto_rescue = true
+          end
+        end
+
+        describe 'of plan with skips' do
+          let :execution_plan do
+            plan = world.plan(Support::RescueExample::ComplexActionWithSkip, :error_on_run)
+            world.execute(plan.id).value
+          end
+
+          it 'skips the action and continues automatically' do
+            execution_plan.state.must_equal :stopped
+            execution_plan.result.must_equal :warning
+          end
+        end
+      end
+    end
+  end
 end

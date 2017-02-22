@@ -6,7 +6,7 @@ module Dynflow
 
       Example = Support::RescueExample
 
-      include WorldInstance
+      let(:world) { WorldFactory.create_world }
 
       def execute(*args)
         plan = world.plan(*args)
@@ -32,7 +32,7 @@ module Dynflow
           rescued_plan.state.must_equal :stopped
           rescued_plan.result.must_equal :warning
           rescued_plan.entry_action.output[:message].
-              must_equal "skipped because some error as you wish"
+            must_equal "skipped because some error as you wish"
         end
 
       end
@@ -113,49 +113,87 @@ module Dynflow
 
       end
 
+      describe 'of complex action with fail' do
+
+        let :execution_plan do
+          execute(Example::ComplexActionWithFail, :error_on_run)
+        end
+
+        it 'suggests failing the plan' do
+          execution_plan.rescue_strategy.must_equal Action::Rescue::Fail
+        end
+
+        it 'fails rescuing' do
+          proc { rescued_plan }.must_raise Errors::RescueError
+          execution_plan.state.must_equal :stopped
+          execution_plan.result.must_equal :error
+          execution_plan.steps_in_state(:success).count.must_equal 5
+          execution_plan.steps_in_state(:pending).count.must_equal 4
+          execution_plan.steps_in_state(:error).count.must_equal 1
+        end
+
+      end
+
       describe 'auto rescue' do
 
-        def world
-          @world ||= WorldInstance.create_world(auto_rescue: true)
+        let(:world) do
+          WorldFactory.create_world do |config|
+            config.auto_rescue = true
+          end
         end
 
         describe 'of plan with skips' do
 
-           let :execution_plan do
-             execute(Example::ComplexActionWithSkip, :error_on_run)
-           end
+          let :execution_plan do
+            execute(Example::ComplexActionWithSkip, :error_on_run)
+          end
 
-           it 'skips the action and continues automatically' do
-             execution_plan.state.must_equal :stopped
-             execution_plan.result.must_equal :warning
-           end
+          it 'skips the action and continues automatically' do
+            execution_plan.state.must_equal :stopped
+            execution_plan.result.must_equal :warning
+          end
 
         end
 
         describe 'of plan faild on auto-rescue' do
 
-           let :execution_plan do
-             execute(Example::ActionWithSkip, 1, :error_on_skip)
-           end
+          let :execution_plan do
+            execute(Example::ActionWithSkip, 1, :error_on_skip)
+          end
 
-           it 'tryied to rescue only once' do
-             execution_plan.state.must_equal :paused
-             execution_plan.result.must_equal :error
-           end
+          it 'tried to rescue only once' do
+            execution_plan.state.must_equal :paused
+            execution_plan.result.must_equal :error
+          end
 
         end
 
         describe 'of plan without skips' do
 
           let :execution_plan do
-             execute(Example::ComplexActionWithoutSkip, :error_on_run)
-           end
+            execute(Example::ComplexActionWithoutSkip, :error_on_run)
+          end
 
-           it 'skips the action and continues automatically' do
-             execution_plan.state.must_equal :paused
-             execution_plan.result.must_equal :error
-           end
+          it 'skips the action and continues automatically' do
+            execution_plan.state.must_equal :paused
+            execution_plan.result.must_equal :error
+          end
 
+        end
+
+        describe 'of plan with fail' do
+
+          let :execution_plan do
+            execute(Example::ComplexActionWithFail, :error_on_run)
+          end
+
+          it 'fails the execution plan automatically' do
+            execution_plan.state.must_equal :stopped
+            execution_plan.result.must_equal :error
+            execution_plan.steps_in_state(:success).count.must_equal 5
+            execution_plan.steps_in_state(:pending).count.must_equal 4
+            execution_plan.steps_in_state(:error).count.must_equal 1
+          end
         end
 
       end

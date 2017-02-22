@@ -4,7 +4,7 @@ module Dynflow
 
       def self.state_transitions
         @state_transitions ||= {
-            pending:   [:running, :skipped], # :skipped when it cannot be run because it depends on skipping step
+            pending:   [:running, :skipped, :error], # :skipped when it cannot be run because it depends on skipping step
             running:   [:success, :error, :suspended],
             success:   [:suspended], # after not-done process_update
             suspended: [:running, :error], # process_update, e.g. error in setup_progress_updates
@@ -20,7 +20,7 @@ module Dynflow
 
       def cancellable?
         [:suspended, :running].include?(self.state) &&
-            self.action_class < Action::Cancellable
+          self.action_class < Action::Cancellable
       end
 
       def with_sub_plans?

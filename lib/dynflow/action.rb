@@ -1,5 +1,3 @@
-require 'active_support/inflector'
-
 module Dynflow
   class Action < Serializable
 
@@ -50,9 +48,10 @@ module Dynflow
       nil
     end
 
-    ERROR         = Object.new
-    SUSPEND       = Object.new
-    Phase         = Algebrick.type do
+    ERROR   = Object.new
+    SUSPEND = Object.new
+    Skip    = Algebrick.atom
+    Phase   = Algebrick.type do
       Executable = type do
         variants Plan     = atom,
                  Run      = atom,
@@ -60,7 +59,6 @@ module Dynflow
       end
       variants Executable, Present = atom
     end
-    Skip    = Algebrick.atom
 
     module Executable
       def execute_method_name
@@ -94,8 +92,8 @@ module Dynflow
 
       @phase             = Type! attributes.fetch(:phase), Phase
       @world             = Type! world, World
-      @step              = Type!(attributes.fetch(:step),
-                                 ExecutionPlan::Steps::Abstract) if phase? Executable
+      @step              = Type! attributes.fetch(:step, nil), ExecutionPlan::Steps::Abstract, NilClass
+      raise ArgumentError, 'Step reference missing' if phase?(Executable) && @step.nil?
       @execution_plan_id = Type! attributes.fetch(:execution_plan_id), String
       @id                = Type! attributes.fetch(:id), Integer
       @plan_step_id      = Type! attributes.fetch(:plan_step_id), Integer
@@ -121,25 +119,25 @@ module Dynflow
 
     def phase!(*phases)
       phase?(*phases) or
-          raise TypeError, "Wrong phase #{phase}, required #{phases}"
+        raise TypeError, "Wrong phase #{phase}, required #{phases}"
     end
 
     def input=(hash)
       Type! hash, Hash
       phase! Plan
-      @input = hash.with_indifferent_access
+      @input = Utils.indifferent_hash(hash)
     end
 
     def output=(hash)
       Type! hash, Hash
       phase! Run
-      @output = hash.with_indifferent_access
+      @output = Utils.indifferent_hash(hash)
     end
 
     def output
       if phase? Plan
         @output_reference or
-            raise 'plan_self has to be invoked before being able to reference the output'
+          raise 'plan_self has to be invoked before being able to reference the output'
       else
         @output
       end
@@ -242,12 +240,18 @@ module Dynflow
     end
 
     def state
-      phase! Executable
+      raise "state data not available" if @step.nil?
       @step.state
     end
 
+    # @override to define more descriptive state information for the
+    # action: used in Dynflow console
+    def humanized_state
+      state.to_s
+    end
+
     def error
-      phase! Executable
+      raise "error data not available" if @step.nil?
       @step.error
     end
 
@@ -276,6 +280,21 @@ module Dynflow
       recursion.(input)
     end
 
+    def execute_delay(delay_options, *args)
+      with_error_handling(true) do
+        world.middleware.execute(:delay, self, delay_options, *args) do |*new_args|
+          @serializer = delay(*new_args).tap do |serializer|
+            serializer.perform_serialization!
+          end
+        end
+      end
+    end
+
+    def serializer
+      raise "The action must be delayed in order to access the serializer" if @serializer.nil?
+      @serializer
+    end
+
     protected
 
     def state=(state)
@@ -290,6 +309,10 @@ module Dynflow
     def save_state
       phase! Executable
       @step.save
+    end
+
+    def delay(delay_options, *args)
+      Serializers::Noop.new(args)
     end
 
     # @override to implement the action's *Plan phase* behaviour.
@@ -371,9 +394,14 @@ module Dynflow
 
     # DSL for run phase
 
+    def suspended_action
+      phase! Run
+      @suspended_action ||= Action::Suspended.new(self)
+    end
+
     def suspend(&block)
       phase! Run
-      block.call Action::Suspended.new self if block
+      block.call suspended_action if block
       throw SUSPEND, SUSPEND
     end
 
@@ -385,7 +413,7 @@ module Dynflow
     end
 
     def with_error_handling(propagate_error = nil, &block)
-      raise "wrong state #{self.state}" unless [:skipping, :running].include?(self.state)
+      raise "wrong state #{self.state}" unless [:scheduling, :skipping, :running].include?(self.state)
 
       begin
         catch(ERROR) { block.call }
@@ -396,6 +424,8 @@ module Dynflow
       end
 
       case self.state
+      when :scheduling
+        self.state = :pending
       when :running
         self.state = :success
       when :skipping

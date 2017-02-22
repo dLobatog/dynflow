@@ -1,18 +1,6 @@
 module Dynflow
   module Executors
     class Abstract
-      Event = Algebrick.type do
-        fields! execution_plan_id: String,
-                step_id:           Fixnum,
-                event:             Object,
-                result:            Future
-      end
-
-      Execution = Algebrick.type do
-        fields! execution_plan_id: String,
-                finished:          Future
-      end
-
       include Algebrick::TypeCheck
       attr_reader :world, :logger
 
@@ -21,21 +9,25 @@ module Dynflow
         @logger = world.logger
       end
 
-      # @return [Future]
+      # @param execution_plan_id [String] id of execution plan
+      # @param finished [Concurrent::Edge::Future]
+      # @param wait_for_acceptance [TrueClass|FalseClass] should the executor confirm receiving
+      # the event, disable if calling executor from within executor
+      # @return [Concurrent::Edge::Future]
       # @raise when execution_plan_id is not accepted
-      def execute(execution_plan_id)
+      def execute(execution_plan_id, finished = Concurrent.future, wait_for_acceptance = true)
         raise NotImplementedError
       end
 
-      def event(execution_plan_id, step_id, event, future = Future)
+      def event(execution_plan_id, step_id, event, future = Concurrent.future)
         raise NotImplementedError
       end
 
-      def terminate(future = Future.new)
+      def terminate(future = Concurrent.future)
         raise NotImplementedError
       end
 
-      # @return [Future]
+      # @return [Concurrent::Edge::Future]
       def initialized
         raise NotImplementedError
       end

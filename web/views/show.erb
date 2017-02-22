@@ -1,13 +1,11 @@
-<% if @notice %>
-  <div id="notice" class="alert alert-warning"><%= h(@notice) %></div>
-<% end %>
-
-
 <p>
   <b>Status:</b>
   <%= h(@plan.state) %>
   <% if @plan.state == :paused %>
     <a href="<%= url("/#{@plan.id}/resume") %>" class="postlink">Resume</a>
+  <% end %>
+  <% if @plan.cancellable? %>
+    <a href="<%= url("/#{@plan.id}/cancel") %>" class="postlink">Cancel</a>
   <% end %>
 </p>
 
@@ -15,6 +13,17 @@
   <b>Result:</b>
   <%= h(@plan.result) %>
 </p>
+
+<% if @plan.state == :scheduled && @plan.delay_record %>
+  <p>
+    <b>Start at:</b>
+    <%= h(@plan.delay_record.start_at) %>
+  </p>
+  <p>
+    <b>Start before:</b>
+    <%= h(@plan.delay_record.start_before || "-") %>
+  </p>
+<% end %>
 
 <p>
   <b>Started at:</b>
@@ -30,6 +39,7 @@
   <li><a href="#plan">Plan</a></li>
   <li class="active"><a href="#run">Run</a></li>
   <li><a href="#finalize">Finalize</a></li>
+  <li><a href="#execution-history">Execution History</a></li>
 </ul>
 
 <div class="tab-content">
@@ -51,6 +61,9 @@
   </div>
   <div class="tab-pane" id="finalize">
     <%= erb :flow, locals: { flow: @plan.finalize_flow } %>
+  </div>
+  <div class="tab-pane" id="execution-history">
+    <%= erb :execution_history %>
   </div>
 </div>
 

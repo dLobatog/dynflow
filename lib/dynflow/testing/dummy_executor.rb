@@ -8,15 +8,19 @@ module Dynflow
         @events_to_process = []
       end
 
-      def event(execution_plan_id, step_id, event, future = Future.new)
+      def event(execution_plan_id, step_id, event, future = Concurrent.future)
         @events_to_process << [execution_plan_id, step_id, event, future]
       end
 
+      # returns true if some event was processed.
       def progress
         events = @events_to_process.dup
         clear
         events.each do |execution_plan_id, step_id, event, future|
-          future.resolve true
+          future.success true
+          if event && world.action.state != :suspended
+            return false
+          end
           world.action.execute event
         end
       end

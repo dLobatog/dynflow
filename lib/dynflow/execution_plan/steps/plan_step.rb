@@ -5,17 +5,17 @@ module Dynflow
 
       # @param [Array] children is a private API parameter
       def initialize(execution_plan_id,
-          id,
-          state,
-          action_class,
-          action_id,
-          error,
-          world,
-          started_at = nil,
-          ended_at = nil,
-          execution_time = 0.0,
-          real_time = 0.0,
-          children = [])
+                     id,
+                     state,
+                     action_class,
+                     action_id,
+                     error,
+                     world,
+                     started_at     = nil,
+                     ended_at       = nil,
+                     execution_time = 0.0,
+                     real_time      = 0.0,
+                     children       = [])
 
         super execution_plan_id, id, state, action_class, action_id, error, world, started_at,
               ended_at, execution_time, real_time
@@ -35,6 +35,14 @@ module Dynflow
         super.merge recursive_to_hash(:children => children)
       end
 
+      def delay(delay_options, args)
+        @action.execute_delay(delay_options, *args)
+        persistence.save_action(execution_plan_id, @action)
+        @action.serializer
+      ensure
+        save
+      end
+
       # @return [Action]
       def execute(execution_plan, trigger, from_subscription, *args)
         unless @action
@@ -51,14 +59,14 @@ module Dynflow
       end
 
       def self.state_transitions
-        @state_transitions ||= { pending:   [:running],
-                                 running:   [:success, :error],
-                                 success:   [],
-                                 suspended: [],
-                                 skipped:   [],
-                                 error:     [] }
+        @state_transitions ||= { scheduling: [:pending, :error],
+                                 pending:    [:running, :error],
+                                 running:    [:success, :error],
+                                 success:    [],
+                                 suspended:  [],
+                                 skipped:    [],
+                                 error:      [] }
       end
-
 
       def self.new_from_hash(hash, execution_plan_id, world)
         check_class_matching hash
@@ -76,7 +84,11 @@ module Dynflow
             hash[:children]
       end
 
-      def initialize_action(caller_action)
+      def load_action
+        @action = @world.persistence.load_action(self)
+      end
+
+      def initialize_action(caller_action = nil)
         attributes = { execution_plan_id: execution_plan_id,
                        id:                action_id,
                        step:              self,

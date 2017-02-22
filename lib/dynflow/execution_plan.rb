@@ -13,44 +13,51 @@ module Dynflow
     require 'dynflow/execution_plan/dependency_graph'
 
     attr_reader :id, :world, :root_plan_step, :steps, :run_flow, :finalize_flow,
-                :started_at, :ended_at, :execution_time, :real_time
+                :started_at, :ended_at, :execution_time, :real_time, :execution_history
 
     def self.states
-      @states ||= [:pending, :planning, :planned, :running, :paused, :stopped]
+      @states ||= [:pending, :scheduled, :planning, :planned, :running, :paused, :stopped]
+    end
+
+    def self.results
+      @results ||= [:pending, :success, :warning, :error]
     end
 
     def self.state_transitions
-      @state_transitions ||= { pending:  [:planning],
+      @state_transitions ||= { pending:  [:stopped, :scheduled, :planning],
+                               scheduled: [:planning, :stopped],
                                planning: [:planned, :stopped],
-                               planned:  [:running],
+                               planned:  [:running, :stopped],
                                running:  [:paused, :stopped],
-                               paused:   [:running],
+                               paused:   [:running, :stopped],
                                stopped:  [] }
     end
 
     # all params with default values are part of *private* api
     def initialize(world,
-        id = SecureRandom.uuid,
-        state = :pending,
-        root_plan_step = nil,
-        run_flow = Flows::Concurrence.new([]),
-        finalize_flow = Flows::Sequence.new([]),
-        steps = {},
-        started_at = nil,
-        ended_at = nil,
-        execution_time = nil,
-        real_time = 0.0)
+                   id                = SecureRandom.uuid,
+                   state             = :pending,
+                   root_plan_step    = nil,
+                   run_flow          = Flows::Concurrence.new([]),
+                   finalize_flow     = Flows::Sequence.new([]),
+                   steps             = {},
+                   started_at        = nil,
+                   ended_at          = nil,
+                   execution_time    = nil,
+                   real_time         = 0.0,
+                   execution_history = ExecutionHistory.new)
 
-      @id             = Type! id, String
-      @world          = Type! world, World
-      self.state      = state
-      @run_flow       = Type! run_flow, Flows::Abstract
-      @finalize_flow  = Type! finalize_flow, Flows::Abstract
-      @root_plan_step = root_plan_step
-      @started_at     = Type! started_at, Time, NilClass
-      @ended_at       = Type! ended_at, Time, NilClass
-      @execution_time = Type! execution_time, Numeric, NilClass
-      @real_time      = Type! real_time, Numeric
+      @id                = Type! id, String
+      @world             = Type! world, World
+      self.state         = state
+      @run_flow          = Type! run_flow, Flows::Abstract
+      @finalize_flow     = Type! finalize_flow, Flows::Abstract
+      @root_plan_step    = root_plan_step
+      @started_at        = Type! started_at, Time, NilClass
+      @ended_at          = Type! ended_at, Time, NilClass
+      @execution_time    = Type! execution_time, Numeric, NilClass
+      @real_time         = Type! real_time, Numeric
+      @execution_history = Type! execution_history, ExecutionHistory
 
       steps.all? do |k, v|
         Type! k, Integer
@@ -70,7 +77,7 @@ module Dynflow
         @started_at = Time.now
       when :stopped
         @ended_at       = Time.now
-        @real_time      = @ended_at - @started_at
+        @real_time      = @ended_at - @started_at unless @started_at.nil?
         @execution_time = compute_execution_time
       else
         # ignore
@@ -117,10 +124,25 @@ module Dynflow
       case rescue_strategy
       when Action::Rescue::Pause
         nil
+      when Action::Rescue::Fail
+        update_state :stopped
+        nil
       when Action::Rescue::Skip
         failed_steps.each { |step| self.skip(step) }
         self.id
       end
+    end
+
+    def plan_steps
+      steps_of_type(Dynflow::ExecutionPlan::Steps::PlanStep)
+    end
+
+    def run_steps
+      steps_of_type(Dynflow::ExecutionPlan::Steps::RunStep)
+    end
+
+    def finalize_steps
+      steps_of_type(Dynflow::ExecutionPlan::Steps::FinalizeStep)
     end
 
     def failed_steps
@@ -149,6 +171,25 @@ module Dynflow
       @last_step_id += 1
     end
 
+    def delay(caller_action, action_class, delay_options, *args)
+      save
+      @root_plan_step = add_scheduling_step(action_class, caller_action)
+      execution_history.add("delay", @world.id)
+      serializer = root_plan_step.delay(delay_options, args)
+      delayed_plan = DelayedPlan.new(@world,
+                                     id,
+                                     delay_options[:start_at],
+                                     delay_options.fetch(:start_before, nil),
+                                     serializer)
+      persistence.save_delayed_plan(delayed_plan)
+    ensure
+      update_state(error? ? :stopped : :scheduled)
+    end
+
+    def delay_record
+      @delay_record ||= persistence.load_delayed_plan(id)
+    end
+
     def prepare(action_class, options = {})
       options = options.dup
       caller_action = Type! options.delete(:caller_action), Dynflow::Action, NilClass
@@ -160,25 +201,46 @@ module Dynflow
 
     def plan(*args)
       update_state(:planning)
-      world.transaction_adapter.transaction do
-        world.middleware.execute(:plan_phase, root_plan_step.action_class) do
-          with_planning_scope do
-            root_plan_step.execute(self, nil, false, *args)
+      world.middleware.execute(:plan_phase, root_plan_step.action_class, self) do
+        with_planning_scope do
+          root_plan_step.execute(self, nil, false, *args)
 
-            if @dependency_graph.unresolved?
-              raise "Some dependencies were not resolved: #{@dependency_graph.inspect}"
-            end
+          if @dependency_graph.unresolved?
+            raise "Some dependencies were not resolved: #{@dependency_graph.inspect}"
           end
         end
+      end
 
-        if @run_flow.size == 1
-          @run_flow = @run_flow.sub_flows.first
-        end
-
-        world.transaction_adapter.rollback if error?
+      if @run_flow.size == 1
+        @run_flow = @run_flow.sub_flows.first
       end
       steps.values.each(&:save)
       update_state(error? ? :stopped : :planned)
+    end
+
+    # sends the cancel event to all currently running and cancellable steps.
+    # if the plan is just scheduled, it cancels it (and returns an one-item
+    # array with the future value of the cancel result)
+    def cancel
+      if state == :scheduled
+        [Concurrent.future.tap { |f| f.success delay_record.cancel }]
+      else
+        steps_to_cancel.map do |step|
+          world.event(id, step.id, ::Dynflow::Action::Cancellable::Cancel)
+        end
+      end
+    end
+
+    def cancellable?
+      return true if state == :scheduled
+      return false unless state == :running
+      steps_to_cancel.any?
+    end
+
+    def steps_to_cancel
+      steps_in_state(:running, :suspended).find_all do |step|
+        step.action(self).is_a?(::Dynflow::Action::Cancellable)
+      end
     end
 
     def skip(step)
@@ -213,6 +275,11 @@ module Dynflow
     end
 
     # @api private
+
+    def steps_of_type(type)
+      steps.values.find_all { |step| step.is_a?(type) }
+    end
+
     def current_run_flow
       @run_flow_stack.last
     end
@@ -235,6 +302,12 @@ module Dynflow
     ensure
       @run_flow_stack.pop
       current_run_flow.add_and_resolve(@dependency_graph, new_flow) if current_run_flow
+    end
+
+    def add_scheduling_step(action_class, caller_action = nil)
+      add_step(Steps::PlanStep, action_class, generate_action_id, :scheduling).tap do |step|
+        step.initialize_action(caller_action)
+      end
     end
 
     def add_plan_step(action_class, caller_action = nil)
@@ -274,7 +347,8 @@ module Dynflow
                         started_at:        time_to_str(started_at),
                         ended_at:          time_to_str(ended_at),
                         execution_time:    execution_time,
-                        real_time:         real_time
+                        real_time:         real_time,
+                        execution_history: execution_history.to_hash
     end
 
     def save
@@ -295,7 +369,8 @@ module Dynflow
                string_to_time(hash[:started_at]),
                string_to_time(hash[:ended_at]),
                hash[:execution_time].to_f,
-               hash[:real_time].to_f)
+               hash[:real_time].to_f,
+               ExecutionHistory.new_from_hash(hash[:execution_history]))
     end
 
     def compute_execution_time
@@ -307,6 +382,7 @@ module Dynflow
     # @return [0..1] the percentage of the progress. See Action::Progress for more
     # info
     def progress
+      return 0 if [:pending, :planning, :scheduled].include?(state)
       flow_step_ids         = run_flow.all_step_ids + finalize_flow.all_step_ids
       plan_done, plan_total = flow_step_ids.reduce([0.0, 0]) do |(done, total), step_id|
         step = self.steps[step_id]
@@ -337,10 +413,10 @@ module Dynflow
       world.persistence
     end
 
-    def add_step(step_class, action_class, action_id)
+    def add_step(step_class, action_class, action_id, state = :pending)
       step_class.new(self.id,
                      self.generate_step_id,
-                     :pending,
+                     state,
                      action_class,
                      action_id,
                      nil,
@@ -350,9 +426,15 @@ module Dynflow
     end
 
     def self.steps_from_hash(step_ids, execution_plan_id, world)
+      steps = world.persistence.load_steps(execution_plan_id, world)
+      ids_to_steps = steps.inject({}) do |hash, step|
+        hash[step.id.to_i] = step
+        hash
+      end
+      # to make sure to we preserve the order of the steps
       step_ids.inject({}) do |hash, step_id|
-        step = world.persistence.load_step(execution_plan_id, step_id, world)
-        hash.update(step_id.to_i => step)
+        hash[step_id.to_i] = ids_to_steps[step_id.to_i]
+        hash
       end
     end
 

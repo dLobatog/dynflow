@@ -5,7 +5,8 @@ module Dynflow
     describe ExecutionPlan do
 
       include PlanAssertions
-      include WorldInstance
+
+      let(:world) { WorldFactory.create_world }
 
       let :issues_data do
         [{ 'author' => 'Peter Smith', 'text' => 'Failing test' },
@@ -59,7 +60,6 @@ module Dynflow
           end
 
         end
-
 
         describe 'for error in running phase' do
 
@@ -223,7 +223,6 @@ module Dynflow
           end
         end
 
-
         describe 'finalize flow' do
 
           let :execution_plan do
@@ -241,6 +240,28 @@ module Dynflow
             RUN_FLOW
           end
 
+        end
+      end
+
+      describe '#cancel' do
+        include TestHelpers
+
+        let :execution_plan do
+          world.plan(Support::CodeWorkflowExample::CancelableSuspended, { text: 'cancel-external' })
+        end
+
+        it 'cancels' do
+          finished = world.execute(execution_plan.id)
+          plan = wait_for do
+            plan = world.persistence.load_execution_plan(execution_plan.id)
+            if plan.cancellable?
+              plan
+            end
+          end
+          cancel_events = plan.cancel
+          cancel_events.size.must_equal 1
+          cancel_events.each(&:wait)
+          finished.wait
         end
       end
 

@@ -2,7 +2,8 @@ require_relative 'test_helper'
 
 module Dynflow
   describe 'action' do
-    include WorldInstance
+
+    let(:world) { WorldFactory.create_world }
 
     describe Action::Missing do
 
@@ -47,7 +48,6 @@ module Dynflow
     end
 
     describe Action::Present do
-      include WorldInstance
 
       let :execution_plan do
         result = world.trigger(Support::CodeWorkflowExample::IncomingIssues, issues_data)
@@ -81,13 +81,38 @@ module Dynflow
       end
 
       it 'fails when output is not serializable' do
-        klass  = Class.new(Dynflow::Action) do
+        klass = Class.new(Dynflow::Action) do
           def run
             output.update key: Object.new
           end
         end
         action = create_and_plan_action klass, {}
         -> { run_action action }.must_raise NoMethodError
+      end
+    end
+
+    describe '#humanized_state' do
+      include Testing
+
+      class ActionWithHumanizedState < Dynflow::Action
+        def run(event = nil)
+          suspend unless event
+        end
+
+        def humanized_state
+          case state
+          when :suspended
+            "waiting"
+          else
+            super
+          end
+        end
+      end
+
+      it 'is customizable from an action' do
+        plan   = create_and_plan_action ActionWithHumanizedState, {}
+        action = run_action(plan)
+        action.humanized_state.must_equal "waiting"
       end
     end
 
@@ -123,7 +148,7 @@ module Dynflow
 
         class Config
           attr_accessor :external_service, :poll_max_retries,
-              :poll_intervals, :attempts_before_next_interval
+                        :poll_intervals, :attempts_before_next_interval
 
           def initialize
             @external_service              = ExternalService.new
@@ -172,85 +197,138 @@ module Dynflow
         end
       end
 
-      let(:plan) do
-        create_and_plan_action TestPollingAction, { task_args: 'do something' }
+      class NonRunningExternalService < ExternalService
+        def poll(id)
+          return { message: 'nothing changed' }
+        end
       end
 
-      before do
-        TestPollingAction.config = TestPollingAction::Config.new
-      end
-
-      def next_ping(action)
-        action.world.clock.pending_pings.first
-      end
-
-      it 'initiates the external task' do
-        action   = run_action plan
-
-        action.output[:task][:task_id].must_equal 123
-      end
-
-      it 'polls till the task is done' do
-        action   = run_action plan
-
-        9.times { progress_action_time action }
-        action.done?.must_equal false
-        next_ping(action).wont_be_nil
-        action.state.must_equal :suspended
-
-        progress_action_time action
-        action.done?.must_equal true
-        next_ping(action).must_be_nil
-        action.state.must_equal :success
-      end
-
-      it 'tries to poll for the old task when resuming' do
-        action   = run_action plan
-        action.output[:task][:progress].must_equal 0
-        run_action action
-        action.output[:task][:progress].must_equal 10
-      end
-
-      it 'invokes the external task again when polling on the old one fails' do
-        action   = run_action plan
-        action.world.silence_logger!
-        action.external_service.will_fail
-        action.output[:task][:progress].must_equal 0
-        run_action action
-        action.output[:task][:progress].must_equal 0
-      end
-
-      it 'tolerates some failure while polling' do
-        action   = run_action plan
-        action.external_service.will_fail
-        action.world.silence_logger!
-
-        TestPollingAction.config.poll_max_retries = 3
-        (1..2).each do |attempt|
-          progress_action_time action
-          action.poll_attempts[:failed].must_equal attempt
-          next_ping(action).wont_be_nil
-          action.state.must_equal :suspended
+      class TestTimeoutAction < TestPollingAction
+        class Config < TestPollingAction::Config
+          def initialize
+            super
+            @external_service = NonRunningExternalService.new
+          end
         end
 
-        progress_action_time action
-        action.poll_attempts[:failed].must_equal 3
-        next_ping(action).must_be_nil
-        action.state.must_equal :error
+        def done?
+          self.state == :error
+        end
+
+        def invoke_external_task
+          schedule_timeout(5)
+          super
+        end
       end
 
-      it 'allows increasing poll interval in a time' do
-        TestPollingAction.config.poll_intervals = [1, 2]
-        TestPollingAction.config.attempts_before_next_interval = 1
+      describe'without timeout' do
+        let(:plan) do
+          create_and_plan_action TestPollingAction, { task_args: 'do something' }
+        end
 
-        action   = run_action plan
-        next_ping(action).when.must_equal 1
-        progress_action_time action
-        next_ping(action).when.must_equal 2
-        progress_action_time action
-        next_ping(action).when.must_equal 2
+        before do
+          TestPollingAction.config = TestPollingAction::Config.new
+        end
+
+        def next_ping(action)
+          action.world.clock.pending_pings.first
+        end
+
+        it 'initiates the external task' do
+          action = run_action plan
+
+          action.output[:task][:task_id].must_equal 123
+        end
+
+        it 'polls till the task is done' do
+          action = run_action plan
+
+          9.times { progress_action_time action }
+          action.done?.must_equal false
+          next_ping(action).wont_be_nil
+          action.state.must_equal :suspended
+
+          progress_action_time action
+          action.done?.must_equal true
+          next_ping(action).must_be_nil
+          action.state.must_equal :success
+        end
+
+        it 'tries to poll for the old task when resuming' do
+          action = run_action plan
+          action.output[:task][:progress].must_equal 0
+          run_action action
+          action.output[:task][:progress].must_equal 10
+        end
+
+        it 'invokes the external task again when polling on the old one fails' do
+          action = run_action plan
+          action.world.silence_logger!
+          action.external_service.will_fail
+          action.output[:task][:progress].must_equal 0
+          run_action action
+          action.output[:task][:progress].must_equal 0
+        end
+
+        it 'tolerates some failure while polling' do
+          action = run_action plan
+          action.external_service.will_fail
+          action.world.silence_logger!
+
+          TestPollingAction.config.poll_max_retries = 3
+          (1..2).each do |attempt|
+            progress_action_time action
+            action.poll_attempts[:failed].must_equal attempt
+            next_ping(action).wont_be_nil
+            action.state.must_equal :suspended
+          end
+
+          progress_action_time action
+          action.poll_attempts[:failed].must_equal 3
+          next_ping(action).must_be_nil
+          action.state.must_equal :error
+        end
+
+        it 'allows increasing poll interval in a time' do
+          TestPollingAction.config.poll_intervals = [1, 2]
+          TestPollingAction.config.attempts_before_next_interval = 2
+
+          action = run_action plan
+          pings = []
+          pings << next_ping(action)
+          progress_action_time action
+          pings << next_ping(action)
+          progress_action_time action
+          pings << next_ping(action)
+          progress_action_time action
+          (pings[1].when - pings[0].when).must_be_close_to 1
+          (pings[2].when - pings[1].when).must_be_close_to 2
+        end
       end
 
+      describe 'with timeout' do
+        let(:plan) do
+          create_and_plan_action TestTimeoutAction, { task_args: 'do something' }
+        end
+
+        before do
+          TestTimeoutAction.config = TestTimeoutAction::Config.new
+          TestTimeoutAction.config.poll_intervals = [2]
+        end
+
+        it 'timesout' do
+          action = run_action plan
+          iterations = 0
+          while progress_action_time action
+            # we count the number of iterations till the timeout occurs
+            iterations += 1
+          end
+          action.state.must_equal :error
+          # two polls in 2 seconds intervals untill the 5 seconds
+          # timeout appears
+          iterations.must_equal 3
+        end
+      end
     end
 
     describe Action::WithSubPlans do
@@ -270,26 +348,31 @@ module Dynflow
         include Dynflow::Action::WithSubPlans
 
         def create_sub_plans
-          input[:count].times.map{ trigger(ChildAction) }
+          input[:count].times.map { trigger(ChildAction, suspend: input[:suspend]) }
         end
 
-        def resume
+        def resume(*args)
           output[:custom_resume] = true
-          super
+          super *args
         end
       end
 
       class ChildAction < Dynflow::Action
-        def plan
+        include Dynflow::Action::Cancellable
+
+        def plan(input)
           if FailureSimulator.fail_in_child_plan
             raise "Fail in child plan"
           end
           super
         end
 
-        def run
+        def run(event = nil)
           if FailureSimulator.fail_in_child_run
             raise "Fail in child run"
+          end
+          if input[:suspend] && !(event == Dynflow::Action::Cancellable::Cancel)
+            suspend
           end
         end
       end
@@ -309,14 +392,16 @@ module Dynflow
       specify "it saves the information about number for sub plans in the output" do
         execution_plan.entry_action.output.must_equal('total_count'   => 2,
                                                       'failed_count'  => 0,
-                                                      'success_count' => 2)
+                                                      'success_count' => 2,
+                                                      'pending_count' => 0)
       end
 
       specify "when a sub plan fails, the caller action fails as well" do
         FailureSimulator.fail_in_child_run = true
         execution_plan.entry_action.output.must_equal('total_count'   => 2,
                                                       'failed_count'  => 2,
-                                                      'success_count' => 0)
+                                                      'success_count' => 0,
+                                                      'pending_count' => 0)
         execution_plan.state.must_equal :paused
         execution_plan.result.must_equal :error
       end
@@ -356,6 +441,24 @@ module Dynflow
           resumed_plan = world.execute(execution_plan.id).value
           resumed_plan.state.must_equal :stopped
           resumed_plan.result.must_equal :success
+        end
+      end
+
+      describe 'cancelling' do
+        include TestHelpers
+
+        it "sends the cancel event to all actions that are running and support cancelling" do
+          triggered_plan = world.trigger(ParentAction, count: 2, suspend: true)
+          plan = wait_for do
+            plan = world.persistence.load_execution_plan(triggered_plan.id)
+            if plan.cancellable?
+              plan
+            end
+          end
+          plan.cancel
+          triggered_plan.finished.wait
+          triggered_plan.finished.value.state.must_equal :stopped
+          triggered_plan.finished.value.result.must_equal :success
         end
       end
     end
