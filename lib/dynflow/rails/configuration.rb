@@ -22,6 +22,11 @@ module Dynflow
       # what rake tasks should run their own executor, not depending on the external one
       attr_accessor :rake_tasks_with_executor
 
+      # if true, the ForemanTasks::Concerns::ActionTriggering will make
+      # no effect. Useful for testing, where we mignt not want to execute
+      # the orchestration tied to the models.
+      attr_accessor :disable_active_record_actions
+
       def initialize
         self.pool_size                = 5
         self.db_pool_size             = pool_size + 5

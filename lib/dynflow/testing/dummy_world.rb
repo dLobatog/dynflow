@@ -38,6 +38,8 @@ module Dynflow
         nil
       end
 
+      def auto_execute; end
+      def terminated; end
     end
   end
 end
