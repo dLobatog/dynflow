@@ -1,3 +1,5 @@
+require 'rails'
+
 module Dynflow
   class Rails
     class Configuration

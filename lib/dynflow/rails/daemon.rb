@@ -1,6 +1,7 @@
 require 'fileutils'
 require 'get_process_mem'
 require 'dynflow/watchers/memory_consumption_watcher'
+require 'active_support/core_ext/numeric/bytes'
 
 module Dynflow
   class Rails
@@ -32,7 +33,7 @@ module Dynflow
 
         ::Rails.application.dynflow.executor!
 
-        if !options[:memory_limit].nil? && options[:memory_limit] > 0
+        if options[:memory_limit] && options[:memory_limit] > 0
           ::Rails.application.dynflow.config.on_init do |world|
             memory_watcher = initialize_memory_watcher(world, options[:memory_limit], options)
             world.terminated.on_completion do
@@ -119,7 +120,7 @@ module Dynflow
           wait_sleep: 1,
           executors_count: (ENV['EXECUTORS_COUNT'] || 1).to_i,
           memory_limit: begin
-                          (ENV['EXECUTOR_MEMORY_LIMIT'] || '').to_gb.gigabytes
+                          to_gb((ENV['EXECUTOR_MEMORY_LIMIT'] || '')).gigabytes
                         rescue RuntimeError
                           ENV['EXECUTOR_MEMORY_LIMIT'].to_i
                         end,
@@ -150,6 +151,30 @@ module Dynflow
         message = "Memory level OK, registered #{current_memory} bytes, which is less than #{memory_limit} limit."
         world.dynflow_logger.debug(message)
       end
+
+      private
+
+      # Taken straight from https://github.com/theforeman/foreman/blob/develop/lib/core_extensions.rb#L142
+      # in order to make this class work with any Rails project
+      def to_gb(string)
+        match_data = string.match(/^(\d+(\.\d+)?) ?(([KMGT]i?B?|B|Bytes))?$/i)
+        if match_data.present?
+          value, _, unit = match_data[1..3]
+        else
+          raise "Unknown string: #{string.inspect}!"
+        end
+        unit ||= :byte #default to bytes if no unit given
+
+        case unit.downcase.to_sym
+        when :b, :byte, :bytes then (value.to_f / 1.gigabyte)
+        when :tb, :tib, :t, :terabyte then (value.to_f * 1.kilobyte)
+        when :gb, :gib, :g, :gigabyte then value.to_f
+        when :mb, :mib, :m, :megabyte then (value.to_f / 1.kilobyte)
+        when :kb, :kib, :k, :kilobyte then (value.to_f / 1.megabyte)
+        else raise "Unknown unit: #{unit.inspect}!"
+        end
+      end
+
     end
   end
 end
